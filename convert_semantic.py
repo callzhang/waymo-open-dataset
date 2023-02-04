@@ -1,13 +1,13 @@
 
+from PIL import Image
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-import os, random
+import os, random, yaml
 import matplotlib.pyplot as plt
 import numpy as np
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import tensorflow.compat.v1 as tf
 tf.enable_eager_execution()
-
-from waymo_open_dataset import dataset_pb2 as open_dataset
+from waymo_open_dataset import dataset_pb2
 from waymo_open_dataset.utils import  frame_utils
 from waymo_open_dataset.protos import segmentation_pb2 as spb # spb.Segmentation.Type.TYPE_TRUCK=2
 
@@ -135,7 +135,7 @@ The maximum improvement was from 0.7417 to 0.7948 for test data 1, and 0.7691 to
 data 2 in terms of recall value.
 '''
 
-def extract_points_images_labels(frame, returns=2):
+def extract_points_labels(frame, returns=2):
     """
     Parse range images and camera projections given a frame.
 
@@ -200,10 +200,11 @@ def extract_points_images_labels(frame, returns=2):
     cp_points_all = np.concatenate([cp_points_all_ri1, cp_points_all_ri2], axis=0)
     # NOTE points: x, y, z, range, intensity, and elongation
     # NOTE labels: instance_id, semantic_id
+        
     if returns==2:
-        return points_all, point_labels_all
+        return points_all, point_labels_all, cp_points_all
     elif returns==1:
-        return points_all_ri1, point_labels_all_ri1
+        return points_all_ri1, point_labels_all_ri1, cp_points_all_ri1
     else:
         raise NotImplementedError
     
@@ -227,46 +228,101 @@ def save_pcd(points, labels, path):
 
 def process_record_frame(i_data_record):
     i, data, tfrecord = i_data_record
-    frame = open_dataset.Frame()
+    frame = dataset_pb2.Frame()
     frame.ParseFromString(bytearray(data.numpy()))
     if frame.lasers[0].ri_return1.segmentation_label_compressed:
         # print(f'processing:{tfrecord}-{i}, name:{frame.context.name}')
         path = f'{tfrecord}.{i}.pcd'.replace('waymo_format', 'waymo_semantic')
-        if os.path.exists(path):
+        img_path = f'{tfrecord}.{i}'.replace('waymo_format', 'waymo_semantic')
+        if os.path.exists(img_path):
             return None
-        points_all, point_labels_all = extract_points_labels(frame)
+        points_all, point_labels_all, cp_points_all = extract_points_labels(frame)
         save_pcd(points_all, point_labels_all, path)
+
         print(f'saved to {path}')
         return path
     
 
 def process_record(tfrecord):
     print(f'processing: {tfrecord}')
+    processed_frames = glob(f'{tfrecord}.*/'.replace('waymo_format', 'waymo_semantic'))
+    fs = [int(f.split('/')[-2].split('.')[-1]) for f in processed_frames]
+    max_f = max(fs)+1 if fs else 0
     dataset = tf.data.TFRecordDataset(tfrecord, compression_type='')
-    for i, data in enumerate(dataset):
-        frame = open_dataset.Frame()
-        frame.ParseFromString(bytearray(data.numpy()))
+    if max_f > 0:
+        print(f'processed {max_f} frames')
+        if max_f >= 169:
+            print(f'skip {tfrecord}')
+            return
+        dataset = dataset.skip(max_f)
+    record_name = desc=os.path.basename(tfrecord).replace('_with_camera_labels.tfrecord', '')
+    pbar = tqdm(enumerate(dataset))
+    for i, data in pbar:
+        i += max_f
+        pbar.set_description(f'{record_name}-{i}')
         path = f'{tfrecord}.{i}.pcd'.replace('waymo_format', 'waymo_semantic')
+        img_path = f'{tfrecord}.{i}'.replace('waymo_format', 'waymo_semantic')
+        if os.path.exists(img_path):
+            continue
+        frame = dataset_pb2.Frame()
+        frame.ParseFromString(bytearray(data.numpy()))
         if frame.lasers[0].ri_return1.segmentation_label_compressed:
-            # print(f'processing:{tfrecord}-{i}, name:{frame.context.name}')
-            # if os.path.exists(path):
-            #     return None
-            points_all, point_labels_all = extract_points_labels(frame)
-            save_pcd(points_all, point_labels_all, path)
-            print(f'saved to {path}')
-            return path
+            points_all, point_labels_all, cp_points_all = extract_points_labels(frame)
+            if not os.path.exists(path):
+                raise ValueError(f'{path} does not exist')
+                save_pcd(points_all, point_labels_all, path)
+            
+            # get images
+            images = sorted(frame.images, key=lambda i: i.name)
+            # calibration
+            calibrations = sorted(frame.context.camera_calibrations, key=lambda c: c.name)
+
+            # extract image and calibration info
+            os.makedirs(img_path, exist_ok=True)
+            for image, calib in zip(images, calibrations):
+                assert image.name == calib.name
+                cam_name_str = dataset_pb2.CameraName.Name.Name(image.name)
+                pbar.set_description(f'{record_name}-{i}-{cam_name_str}')
+                h, w = calib.height, calib.width
+                extrinsic = np.array(calib.extrinsic.transform).reshape([4, 4])
+                extrinsic = np.linalg.inv(extrinsic)
+                f_u, f_v, c_u, c_v, k_1, k_2, p_1, p_2, k_3 = calib.intrinsic
+                intrinsic = np.array([
+                    [f_u, 0,   c_u],
+                    [0,   f_v, c_v],
+                    [0,   0,     1]])
+                distCoeffs = np.array([k_1, k_2, p_1, p_2, k_3])
+                # save calibration
+                with open(f'{img_path}/{cam_name_str}.yaml', 'w') as f:
+                    yaml.dump({
+                        'extrinsic': extrinsic,
+                        'intrinsic': intrinsic,
+                        'distCoeffs': distCoeffs,
+                        'height': h,
+                        'width': w,
+                    }, f)
+                # save image
+                img_np = tf.image.decode_jpeg(image.image).numpy()
+                im = Image.fromarray(img_np, 'RGB')
+                im.save(f"{img_path}/{cam_name_str}.jpg")
+                # save projection
+                mask = cp_points_all[:,0] == image.name
+                point_projection = cp_points_all[mask][:, 1:3]
+                np.save(f'{img_path}/{cam_name_str}_projection.npy', point_projection)
+                np.save(f'{img_path}/{cam_name_str}_mask.npy', mask)
+                
         # elif 'testing' in tfrecord:
         #     points_all, point_labels_all = extract_points_labels(frame)
         #     save_pcd(points_all, point_labels_all, path)
         #     print(f'saved to {path}')
 
 if __name__ == '__main__':
-    dataset = 'training' # 'validation' # 'testing'
+    dataset = 'training' #'validation' # 'testing' #'training'
     records = glob(f'waymo/waymo_format/{dataset}/*.tfrecord')
+    random.shuffle(records)
     for record in tqdm(records):
         process_record(record)
     
-    # random.shuffle(records)
     ## multithreading
     # with ThreadPoolExecutor(max_workers=4) as executor:
     #     list(tqdm(executor.map(process_record, records), total=len(records)))
