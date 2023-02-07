@@ -244,15 +244,26 @@ def process_record_frame(i_data_record):
     
 
 def process_record(tfrecord):
-    print(f'processing: {tfrecord}')
+    # print(f'processing: {tfrecord}')
     processed_frames = glob(f'{tfrecord}.*/'.replace('waymo_format', 'waymo_semantic'))
     fs = [int(f.split('/')[-2].split('.')[-1]) for f in processed_frames]
     max_f = max(fs)+1 if fs else 0
     dataset = tf.data.TFRecordDataset(tfrecord, compression_type='')
     if max_f > 0:
-        print(f'processed {max_f} frames')
-        if max_f >= 169:
-            print(f'skip {tfrecord}')
+        # print(f'processed {max_f} frames')
+        if max_f >= 160:
+            # print(f'skip {tfrecord}')
+            fs200 = [f for f in fs if f >= 200]
+            for f in fs200:
+                print(f'removed {tfrecord}.{f}')
+                os.system(f'rm -r {tfrecord}.{f}')
+            processed_pcds = glob(f'{tfrecord}.*.pcd'.replace('waymo_format', 'waymo_semantic'))
+            fs = [int(f.split('/')[-1].split('.')[-2]) for f in processed_pcds]
+            fs200 = [f for f in fs if f >= 200]
+            # clean up
+            for f in fs200:
+                print(f'removed {tfrecord}.{f}.pcd')
+                os.system(f'rm {tfrecord}.{f}.pcd')
             return
         dataset = dataset.skip(max_f)
     record_name = desc=os.path.basename(tfrecord).replace('_with_camera_labels.tfrecord', '')
@@ -317,7 +328,7 @@ def process_record(tfrecord):
         #     print(f'saved to {path}')
 
 if __name__ == '__main__':
-    dataset = 'validation' # 'testing' #'training'
+    dataset = 'training' #'validation' # 'testing' #'training'
     records = glob(f'waymo/waymo_format/{dataset}/*.tfrecord')
     # random.shuffle(records)
     for record in tqdm(records):
