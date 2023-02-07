@@ -269,7 +269,7 @@ def process_record(tfrecord):
         if frame.lasers[0].ri_return1.segmentation_label_compressed:
             points_all, point_labels_all, cp_points_all = extract_points_labels(frame)
             if not os.path.exists(path):
-                raise ValueError(f'{path} does not exist')
+                # raise ValueError(f'{path} does not exist')
                 save_pcd(points_all, point_labels_all, path)
             
             # get images
@@ -295,12 +295,12 @@ def process_record(tfrecord):
                 # save calibration
                 with open(f'{img_path}/{cam_name_str}.yaml', 'w') as f:
                     yaml.dump({
-                        'extrinsic': extrinsic,
-                        'intrinsic': intrinsic,
-                        'distCoeffs': distCoeffs,
+                        'extrinsic': extrinsic.tolist(),
+                        'intrinsic': intrinsic.tolist(),
+                        'distCoeffs': distCoeffs.tolist(),
                         'height': h,
                         'width': w,
-                    }, f)
+                    }, f, default_flow_style=False)
                 # save image
                 img_np = tf.image.decode_jpeg(image.image).numpy()
                 im = Image.fromarray(img_np, 'RGB')
@@ -317,9 +317,9 @@ def process_record(tfrecord):
         #     print(f'saved to {path}')
 
 if __name__ == '__main__':
-    dataset = 'training' #'validation' # 'testing' #'training'
+    dataset = 'validation' # 'testing' #'training'
     records = glob(f'waymo/waymo_format/{dataset}/*.tfrecord')
-    random.shuffle(records)
+    # random.shuffle(records)
     for record in tqdm(records):
         process_record(record)
     
@@ -340,12 +340,15 @@ if __name__ == '__main__':
     ## generate pcd list
     pcd_train = glob('waymo/waymo_semantic/training/*.pcd')
     pcd_train = [p.replace('waymo/waymo_semantic/', '') for p in pcd_train]
+    pcd_train.sort()
     print(f'train: {len(pcd_train)}')
     pcd_val = glob('waymo/waymo_semantic/validation/*.pcd')
     pcd_val = [p.replace('waymo/waymo_semantic/', '') for p in pcd_val]
+    pcd_val.sort()
     print(f'val: {len(pcd_val)}')
     pcd_test = glob('waymo/waymo_semantic/testing/*.pcd')
     pcd_test = [p.replace('waymo/waymo_semantic/', '') for p in pcd_test]
+    pcd_test.sort()
     print(f'test: {len(pcd_test)}')
     with open('waymo/waymo_semantic/train.txt', 'w') as f:
         f.write('\n'.join(pcd_train))
