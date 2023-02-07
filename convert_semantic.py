@@ -244,44 +244,51 @@ def process_record_frame(i_data_record):
     
 
 def process_record(tfrecord):
-    # print(f'processing: {tfrecord}')
-    processed_frames = glob(f'{tfrecord}.*/'.replace('waymo_format', 'waymo_semantic'))
+    print(f'processing: {tfrecord}')
+    path = tfrecord.replace('waymo_format', 'waymo_semantic')
+    processed_frames = glob(f'{path}.*/')
     fs = [int(f.split('/')[-2].split('.')[-1]) for f in processed_frames]
+    processed_pcds = glob(f'{path}.*.pcd')
+    ps = [int(f.split('/')[-1].split('.')[-2]) for f in processed_pcds]
     max_f = max(fs)+1 if fs else 0
+    redundant_frames = set(fs) - set(ps)
+    redundant_pcds = set(ps) - set(fs)
+    cleaned = False
+    # clean redundant frames
+    fs200 = [f for f in fs if f >= 200]
+    for f in fs200 + list(redundant_frames):
+        print(f'removed {path}.{f}')
+        os.system(f'rm -r {path}.{f}')
+        cleaned = True
+    fs200 = [f for f in ps if f >= 200]
+    # clean redundant pcds
+    for f in fs200 + list(redundant_pcds):
+        print(f'removed {path}.{f}.pcd')
+        os.system(f'rm {path}.{f}.pcd')
+        cleaned = True
+    # skip finished tfrecord
+    if len(set(fs)^set(ps)) == 0 and max_f > 160:
+        return
+
     dataset = tf.data.TFRecordDataset(tfrecord, compression_type='')
-    if max_f > 0:
-        # print(f'processed {max_f} frames')
-        if max_f >= 160:
-            # print(f'skip {tfrecord}')
-            fs200 = [f for f in fs if f >= 200]
-            for f in fs200:
-                print(f'removed {tfrecord}.{f}')
-                os.system(f'rm -r {tfrecord}.{f}')
-            processed_pcds = glob(f'{tfrecord}.*.pcd'.replace('waymo_format', 'waymo_semantic'))
-            fs = [int(f.split('/')[-1].split('.')[-2]) for f in processed_pcds]
-            fs200 = [f for f in fs if f >= 200]
-            # clean up
-            for f in fs200:
-                print(f'removed {tfrecord}.{f}.pcd')
-                os.system(f'rm {tfrecord}.{f}.pcd')
-            return
+    if not cleaned:
         dataset = dataset.skip(max_f)
-    record_name = desc=os.path.basename(tfrecord).replace('_with_camera_labels.tfrecord', '')
+    record_name = os.path.basename(tfrecord).replace('_with_camera_labels.tfrecord', '')
     pbar = tqdm(enumerate(dataset))
     for i, data in pbar:
         i += max_f
         pbar.set_description(f'{record_name}-{i}')
-        path = f'{tfrecord}.{i}.pcd'.replace('waymo_format', 'waymo_semantic')
-        img_path = f'{tfrecord}.{i}'.replace('waymo_format', 'waymo_semantic')
-        if os.path.exists(img_path):
+        pcd_path = f'{path}.{i}.pcd'.replace('waymo_format', 'waymo_semantic')
+        img_folder = f'{path}.{i}'.replace('waymo_format', 'waymo_semantic')
+        if os.path.exists(img_folder):
             continue
         frame = dataset_pb2.Frame()
         frame.ParseFromString(bytearray(data.numpy()))
         if frame.lasers[0].ri_return1.segmentation_label_compressed:
             points_all, point_labels_all, cp_points_all = extract_points_labels(frame)
-            if not os.path.exists(path):
+            if not os.path.exists(pcd_path):
                 # raise ValueError(f'{path} does not exist')
-                save_pcd(points_all, point_labels_all, path)
+                save_pcd(points_all, point_labels_all, pcd_path)
             
             # get images
             images = sorted(frame.images, key=lambda i: i.name)
@@ -289,7 +296,7 @@ def process_record(tfrecord):
             calibrations = sorted(frame.context.camera_calibrations, key=lambda c: c.name)
 
             # extract image and calibration info
-            os.makedirs(img_path, exist_ok=True)
+            os.makedirs(img_folder, exist_ok=True)
             for image, calib in zip(images, calibrations):
                 assert image.name == calib.name
                 cam_name_str = dataset_pb2.CameraName.Name.Name(image.name)
@@ -304,7 +311,7 @@ def process_record(tfrecord):
                     [0,   0,     1]])
                 distCoeffs = np.array([k_1, k_2, p_1, p_2, k_3])
                 # save calibration
-                with open(f'{img_path}/{cam_name_str}.yaml', 'w') as f:
+                with open(f'{img_folder}/{cam_name_str}.yaml', 'w') as f:
                     yaml.dump({
                         'extrinsic': extrinsic.tolist(),
                         'intrinsic': intrinsic.tolist(),
@@ -315,12 +322,12 @@ def process_record(tfrecord):
                 # save image
                 img_np = tf.image.decode_jpeg(image.image).numpy()
                 im = Image.fromarray(img_np, 'RGB')
-                im.save(f"{img_path}/{cam_name_str}.jpg")
+                im.save(f"{img_folder}/{cam_name_str}.jpg")
                 # save projection
                 mask = cp_points_all[:,0] == image.name
                 point_projection = cp_points_all[mask][:, 1:3]
-                np.save(f'{img_path}/{cam_name_str}_projection.npy', point_projection)
-                np.save(f'{img_path}/{cam_name_str}_mask.npy', mask)
+                np.save(f'{img_folder}/{cam_name_str}_projection.npy', point_projection)
+                np.save(f'{img_folder}/{cam_name_str}_mask.npy', mask)
                 
         # elif 'testing' in tfrecord:
         #     points_all, point_labels_all = extract_points_labels(frame)
